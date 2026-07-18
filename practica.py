@@ -30,6 +30,7 @@ python practica.py
 
 import sys
 import os
+import re
 import math
 import wave
 import threading
@@ -129,9 +130,29 @@ def cargar_wav(path):
 # -----------------------------------------------------------------------
 # 2. COMPARAR texto dicho vs esperado
 # -----------------------------------------------------------------------
+# Cualquier caracter que NO sea letra, número o espacio se considera
+# puntuación y se elimina antes de comparar (comas, puntos, signos de
+# interrogación/exclamación, apóstrofes, guiones, etc). Así el usuario
+# nunca es penalizado por no "pronunciar" un signo de puntuación.
+_APOSTROFE_RE = re.compile(r"['’]")
+_PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
+
+
+def limpiar_texto(texto):
+    """Quita toda la puntuación y normaliza espacios/mayúsculas,
+    dejando solo las palabras para poder compararlas de forma justa.
+
+    Los apóstrofes se eliminan SIN dejar espacio (how's -> hows, don't -> dont)
+    para que las contracciones no se partan en dos palabras. El resto de
+    signos (comas, puntos, ?, !, etc.) se reemplazan por espacio."""
+    texto = _APOSTROFE_RE.sub("", texto.lower())
+    sin_puntuacion = _PUNCT_RE.sub(" ", texto)
+    return " ".join(sin_puntuacion.split())
+
+
 def comparar_texto(esperado, dicho):
-    esperado_norm = esperado.lower().strip(" .,!?")
-    dicho_norm = dicho.lower().strip(" .,!?")
+    esperado_norm = limpiar_texto(esperado)
+    dicho_norm = limpiar_texto(dicho)
 
     ratio = difflib.SequenceMatcher(None, esperado_norm, dicho_norm).ratio()
 
