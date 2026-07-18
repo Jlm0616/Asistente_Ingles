@@ -1,5 +1,9 @@
 """
-Práctica oral de inglés - Interfaz estilo Jarvis/Siri con voces reales
+J.A.R.V.I.S. — Judge, Assist, Repeat, Verify, Improve Speech
+
+P.H.O.E.N.I.X. - Pronunciation, Hearing, Oral Evaluation & Natural Interactive eXperience
+
+N.O.V.A. - Native-like Oral Vocabulary Assistant
 =========================================================================
 
 Dos modos:
@@ -64,6 +68,10 @@ except ImportError:
 
 SAMPLE_RATE = 16000
 VOICES_DIR = "voces"
+
+# Modos de práctica del diálogo
+MODE_FULL = "full"        # graba, transcribe y califica tus líneas
+MODE_CASUAL = "casual"    # solo escuchas al otro personaje; tú hablas libre, sin calificar
 
 # -----------------------------------------------------------------------
 # 1. EL DIÁLOGO
@@ -318,6 +326,7 @@ class JarvisApp(tk.Tk):
         self.subtitles_on = True
         self.current_hablante = None
         self.current_texto = None
+        self.practice_mode = MODE_FULL
 
         # estado del grabador de voces
         self.rec_index = 0
@@ -328,6 +337,7 @@ class JarvisApp(tk.Tk):
         self.anim_cy = 140
         self.canvas = None
         self.continue_btn = None
+        self.back_btn = None
         self.status_dot_label = None
 
         self._build_main_menu()
@@ -525,7 +535,10 @@ class JarvisApp(tk.Tk):
         self._hud_header(self, "Práctica oral", "Juan & Julián · Protocolo de conversación en inglés")
 
         self._hud_button(self, "🎙 Grabar voces de los personajes", self._build_recorder_ui).pack(pady=8)
-        self._hud_button(self, "▶ Practicar diálogo", self._build_role_selector).pack(pady=8)
+        self._hud_button(self, "▶ Practicar diálogo (con calificación)",
+                          lambda: self._build_role_selector(MODE_FULL)).pack(pady=8)
+        self._hud_button(self, "🎧 Práctica casual (solo escuchar)",
+                          lambda: self._build_role_selector(MODE_CASUAL), accent=MUTED).pack(pady=8)
 
         grabadas = sum(
             1 for i, (hablante, _) in enumerate(DIALOGUE) if os.path.exists(voice_path(i, hablante))
@@ -534,16 +547,18 @@ class JarvisApp(tk.Tk):
                  font=FONT_SMALL, fg=MUTED, bg=BG).pack(pady=(24, 0))
 
     # ---------------- selector de personaje ----------------
-    def _build_role_selector(self):
+    def _build_role_selector(self, mode=MODE_FULL):
         self._clear()
         self.canvas = None
-        self._hud_header(self, "Selecciona tu rol", "¿Quién quieres ser en la conversación?")
+        subtitulo = ("¿Quién quieres ser en la conversación?" if mode == MODE_FULL
+                     else "¿Quién quieres ser? (solo escucharás al otro personaje)")
+        self._hud_header(self, "Selecciona tu rol", subtitulo)
 
         frame = tk.Frame(self, bg=BG)
         frame.pack()
 
-        self._hud_button(frame, "Juan", lambda: self._start("Juan"), width=13).grid(row=0, column=0, padx=10)
-        self._hud_button(frame, "Julián", lambda: self._start("Julian"), width=13).grid(row=0, column=1, padx=10)
+        self._hud_button(frame, "Juan", lambda: self._start("Juan", mode), width=13).grid(row=0, column=0, padx=10)
+        self._hud_button(frame, "Julián", lambda: self._start("Julian", mode), width=13).grid(row=0, column=1, padx=10)
 
         tk.Button(self, text=spaced("← volver al menú"), font=FONT_SMALL, fg=MUTED, bg=BG,
                   bd=0, relief="flat", cursor="hand2",
@@ -664,9 +679,10 @@ class JarvisApp(tk.Tk):
     # =========================================================
     #  MODO 2: PRACTICAR DIÁLOGO
     # =========================================================
-    def _start(self, mi):
+    def _start(self, mi, mode=MODE_FULL):
         self.mi_personaje = mi
         self.otro_personaje = "Julian" if mi == "Juan" else "Juan"
+        self.practice_mode = mode
         self.dialogue_index = 0
         self.correctas = 0
         self.total_mias = 0
@@ -696,14 +712,21 @@ class JarvisApp(tk.Tk):
         self.btn_frame = tk.Frame(self, bg=BG)
         self.btn_frame.pack(pady=10)
 
-        self.record_btn = self._hud_button(self.btn_frame, "🎙 Grabar", self._toggle_record, width=21)
-        self.record_btn.grid(row=0, column=0, padx=6, pady=4)
-        self.play_btn = self._hud_button(self.btn_frame, "▶ Escuchar", self._play_recording, width=14, accent=MUTED)
-        self.play_btn.config(state="disabled")
-        self.play_btn.grid(row=0, column=1, padx=6, pady=4)
-        self.accept_btn = self._hud_button(self.btn_frame, "✔ Aceptar", self._accept_recording, width=14, accent=OK)
-        self.accept_btn.config(state="disabled")
-        self.accept_btn.grid(row=0, column=2, padx=6, pady=4)
+        self.record_btn = None
+        self.play_btn = None
+        self.accept_btn = None
+        if self.practice_mode == MODE_FULL:
+            self.record_btn = self._hud_button(self.btn_frame, "🎙 Grabar", self._toggle_record, width=21)
+            self.record_btn.grid(row=0, column=0, padx=6, pady=4)
+            self.play_btn = self._hud_button(self.btn_frame, "▶ Escuchar", self._play_recording, width=14, accent=MUTED)
+            self.play_btn.config(state="disabled")
+            self.play_btn.grid(row=0, column=1, padx=6, pady=4)
+            self.accept_btn = self._hud_button(self.btn_frame, "✔ Aceptar", self._accept_recording, width=14, accent=OK)
+            self.accept_btn.config(state="disabled")
+            self.accept_btn.grid(row=0, column=2, padx=6, pady=4)
+        else:
+            tk.Label(self.btn_frame, text=spaced("modo casual · sin grabación ni calificación"),
+                     font=FONT_SMALL, fg=MUTED, bg=BG).grid(row=0, column=0, columnspan=3, pady=4)
 
         self.progress_label = tk.Label(self, text="", font=FONT_SMALL, fg=MUTED, bg=BG)
         self.progress_label.pack(pady=(16, 0))
@@ -716,14 +739,20 @@ class JarvisApp(tk.Tk):
                   bd=0, relief="flat", cursor="hand2", command=self._build_main_menu).pack(pady=(8, 0))
 
         self.continue_btn = None
+        self.back_btn = None
         self._animate()
 
     def _show_summary(self):
         self._clear()
         self.canvas = None
-        self._hud_header(self, "Diálogo terminado", "Resumen de tu sesión de práctica")
-        tk.Label(self, text=f"{self.correctas} / {self.total_mias} líneas correctas",
-                 font=("Segoe UI", 16), fg=FG, bg=BG).pack(pady=10)
+        if self.practice_mode == MODE_CASUAL:
+            self._hud_header(self, "Diálogo terminado", "¡Buen trabajo practicando la conversación!")
+            tk.Label(self, text="Terminaste todo el diálogo en modo casual.",
+                     font=("Segoe UI", 14), fg=FG, bg=BG).pack(pady=10)
+        else:
+            self._hud_header(self, "Diálogo terminado", "Resumen de tu sesión de práctica")
+            tk.Label(self, text=f"{self.correctas} / {self.total_mias} líneas correctas",
+                     font=("Segoe UI", 16), fg=FG, bg=BG).pack(pady=10)
         self._hud_button(self, "Reiniciar", self._build_main_menu, width=18).pack(pady=30)
 
     def _process_next_line(self):
@@ -738,6 +767,9 @@ class JarvisApp(tk.Tk):
         if self.continue_btn is not None:
             self.continue_btn.destroy()
             self.continue_btn = None
+        if self.back_btn is not None:
+            self.back_btn.destroy()
+            self.back_btn = None
 
         if hablante == self.otro_personaje:
             path = voice_path(self.dialogue_index, hablante)
@@ -749,9 +781,10 @@ class JarvisApp(tk.Tk):
             )
             self.status_label.config(text=texto_estado)
             self.line_label.config(text=self._line_display_text(hablante, texto))
-            self.record_btn.config(state="disabled")
-            self.play_btn.config(state="disabled")
-            self.accept_btn.config(state="disabled")
+            if self.practice_mode == MODE_FULL:
+                self.record_btn.config(state="disabled")
+                self.play_btn.config(state="disabled")
+                self.accept_btn.config(state="disabled")
             self.replay_btn.config(state="disabled")
             self.anim_state = "speaking"
 
@@ -759,11 +792,20 @@ class JarvisApp(tk.Tk):
                 self.anim_state = "idle"
                 self.replay_btn.config(state="normal")
                 self.status_label.config(text=f"¿Quieres escuchar a {self.otro_personaje} de nuevo? Si no, continúa.")
-                self.continue_btn = self._hud_button(self.btn_frame, "➡ Continuar", self._advance,
-                                                       width=44, accent=ACCENT)
-                self.continue_btn.grid(row=1, column=0, columnspan=3, pady=(10, 0))
+                if self.practice_mode == MODE_CASUAL:
+                    self._mostrar_controles_casual()
+                else:
+                    self.continue_btn = self._hud_button(self.btn_frame, "➡ Continuar", self._advance,
+                                                           width=44, accent=ACCENT)
+                    self.continue_btn.grid(row=1, column=0, columnspan=3, pady=(10, 0))
 
             self.voice.play_file_or_speak(path, texto, on_done=lambda: self.after(0, after_speak))
+        elif self.practice_mode == MODE_CASUAL:
+            self.status_label.config(text=f"Tu turno ({self.mi_personaje}) — dilo en voz alta cuando quieras.")
+            self.line_label.config(text=self._line_display_text(hablante, texto))
+            self.replay_btn.config(state="disabled")
+            self.anim_state = "idle"
+            self._mostrar_controles_casual()
         else:
             self.total_mias += 1
             self.status_label.config(text=f"Tu turno ({self.mi_personaje}) — presiona Grabar y di la línea:")
@@ -777,9 +819,9 @@ class JarvisApp(tk.Tk):
     def _replay_audio(self):
         if self.current_texto is None or self.current_hablante is None:
             return
-        es_mi_turno = (self.current_hablante == self.mi_personaje)
+        es_mi_turno_full = (self.current_hablante == self.mi_personaje) and self.practice_mode == MODE_FULL
         self.replay_btn.config(state="disabled")
-        if es_mi_turno:
+        if es_mi_turno_full:
             self.record_btn.config(state="disabled")
             self.play_btn.config(state="disabled")
             self.accept_btn.config(state="disabled")
@@ -789,7 +831,7 @@ class JarvisApp(tk.Tk):
         def done():
             self.anim_state = "idle"
             self.replay_btn.config(state="normal")
-            if es_mi_turno:
+            if es_mi_turno_full:
                 self.record_btn.config(state="normal")
                 hay_audio = self.voice.last_recording is not None
                 self.play_btn.config(state="normal" if hay_audio else "disabled")
@@ -875,6 +917,25 @@ class JarvisApp(tk.Tk):
 
         self.continue_btn = self._hud_button(self.btn_frame, "➡ Continuar", self._advance, width=44, accent=ACCENT)
         self.continue_btn.grid(row=1, column=0, columnspan=3, pady=(10, 0))
+
+    def _mostrar_controles_casual(self):
+        """Muestra Continuar (y Retroceder si no es la primera línea) en modo casual."""
+        if self.dialogue_index > 0:
+            self.back_btn = self._hud_button(self.btn_frame, "⏪ Retroceder", self._retroceder,
+                                              width=20, accent=MUTED)
+            self.back_btn.grid(row=1, column=0, padx=(0, 4), pady=(10, 0))
+            self.continue_btn = self._hud_button(self.btn_frame, "Continuar ⏩", self._advance,
+                                                   width=20, accent=ACCENT)
+            self.continue_btn.grid(row=1, column=1, columnspan=2, padx=(4, 0), pady=(10, 0))
+        else:
+            self.continue_btn = self._hud_button(self.btn_frame, "Continuar ⏩", self._advance,
+                                                   width=44, accent=ACCENT)
+            self.continue_btn.grid(row=1, column=0, columnspan=3, pady=(10, 0))
+
+    def _retroceder(self):
+        if self.dialogue_index > 0:
+            self.dialogue_index -= 1
+        self._process_next_line()
 
     def _advance(self):
         if self.continue_btn is not None:
