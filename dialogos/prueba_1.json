@@ -1,0 +1,21 @@
+{
+  "nombre": "Prueba 1",
+  "participantes": [
+    "Juan",
+    "Julian"
+  ],
+  "lineas": [
+    [
+      "Julian",
+      "HOLA COMO ESTA"
+    ],
+    [
+      "Juan",
+      "Como estas tu"
+    ],
+    [
+      "Julian",
+      "Yo bien gracias"
+    ]
+  ]
+}

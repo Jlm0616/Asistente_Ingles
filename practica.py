@@ -1,5 +1,9 @@
 """
-Práctica oral de inglés - Interfaz estilo Jarvis/Siri con voces reales
+J.A.R.V.I.S. — Judge, Assist, Repeat, Verify, Improve Speech
+
+P.H.O.E.N.I.X. - Pronunciation, Hearing, Oral Evaluation & Natural Interactive eXperience
+
+N.O.V.A. - Native-like Oral Vocabulary Assistant
 =========================================================================
 
 Dos modos:
@@ -17,11 +21,31 @@ Cuando te toca a ti, grabas tu línea, puedes escucharla, y luego la
 aceptas para que el programa la transcriba y compare con la línea
 correcta.
 
+NUEVO — Comandos de voz manos libres (con palabra de activación):
+   En ambos modos de práctica (con calificación y casual), el programa
+   escucha continuamente en segundo plano, pero SOLO actúa si primero
+   dices "Jarvis" o "Fénix" (tus dos nombres finalistas). Todo lo demás
+   que digas se ignora sin interrumpir. Después de decir la palabra de
+   activación puedes decir: "repite", "siguiente", "anterior", "graba",
+   "detente", "escucha mi grabación", "acepta", "menú" o "ayuda".
+   Ejemplo: "Jarvis, siguiente" o "Fénix, repite".
+   El micrófono se pausa automáticamente mientras el programa reproduce
+   audio o mientras grabas tu línea, para evitar que se escuche a sí mismo.
+
+NUEVO — Frases interactivas del asistente (grabables con tu voz):
+   Desde el menú principal puedes grabar frases del propio "asistente"
+   (no de Juan/Julián), como el saludo de bienvenida al iniciar el
+   programa o una frase de confirmación al elegir tu personaje. Si no
+   las grabas, usa voz robótica de respaldo (igual que con el diálogo).
+
 INSTALACIÓN (una sola vez):
 ------------------------------------------------------------------------
 pip install SpeechRecognition pyttsx3 sounddevice numpy
 
 (tkinter y wave ya vienen incluidos con Python)
+(NO se necesita pyaudio: el micrófono de comandos de voz en segundo plano
+ usa 'sounddevice', la misma librería que ya usa el resto del programa
+ para grabar tus líneas.)
 
 EJECUCIÓN:
 ------------------------------------------------------------------------
@@ -30,10 +54,13 @@ python practica.py
 
 import sys
 import os
+import re
+import json
 import math
 import wave
 import threading
 import difflib
+import unicodedata
 
 try:
     import tkinter as tk
@@ -63,6 +90,11 @@ except ImportError:
 
 SAMPLE_RATE = 16000
 VOICES_DIR = "voces"
+DIALOGOS_DIR = "dialogos"  # conversaciones personalizadas creadas por el usuario
+
+# Modos de práctica del diálogo
+MODE_FULL = "full"        # graba, transcribe y califica tus líneas
+MODE_CASUAL = "casual"    # solo escuchas al otro personaje; tú hablas libre, sin calificar
 
 # -----------------------------------------------------------------------
 # 1. EL DIÁLOGO
@@ -104,8 +136,29 @@ DIALOGUE = [
 ]
 
 
-def voice_path(index, speaker):
-    return os.path.join(VOICES_DIR, f"{index:02d}_{speaker}.wav")
+# -----------------------------------------------------------------------
+# 1.5 FRASES INTERACTIVAS DEL ASISTENTE (no son parte del diálogo Juan/Julián)
+# -----------------------------------------------------------------------
+# Se pueden grabar con tu voz desde el menú principal. Si no se graban,
+# se usa la voz robótica (TTS) de respaldo, igual que con el diálogo.
+SYSTEM_PHRASES = {
+    "bienvenida": "Hola señor, un gusto escucharlo de nuevo.",
+    "buena_eleccion": "Buena elección.",
+    "te_escucho": "Dime, señor.",
+}
+
+# Etiquetas legibles para la pantalla de grabación de frases del asistente
+SYSTEM_PHRASE_LABELS = {
+    "bienvenida": "Saludo al iniciar el programa",
+    "buena_eleccion": "Al elegir tu personaje",
+    "te_escucho": "Al activarte con 'Jarvis' o 'Fénix' sin dar un comando",
+}
+
+
+def voice_path(item_id):
+    """item_id puede ser '00_Julian' (línea de diálogo) o
+    'sistema_bienvenida' (frase interactiva del asistente)."""
+    return os.path.join(VOICES_DIR, f"{item_id}.wav")
 
 
 def guardar_wav(path, audio_int16, samplerate):
@@ -127,11 +180,95 @@ def cargar_wav(path):
 
 
 # -----------------------------------------------------------------------
+# 1.6 CONVERSACIONES PERSONALIZADAS (creadas por el usuario)
+# -----------------------------------------------------------------------
+# Cada conversación se guarda como un .json en la carpeta "dialogos/", con
+# los nombres de los dos participantes y la lista de líneas en orden, cada
+# una ya asignada a quién la dice (sin ambigüedad aunque el mismo
+# participante diga varias líneas seguidas).
+def _slugify(texto):
+    """Convierte un nombre en un identificador de archivo seguro
+    (sin acentos, espacios ni símbolos)."""
+    nfkd = unicodedata.normalize("NFKD", texto)
+    sin_acentos = "".join(c for c in nfkd if not unicodedata.combining(c))
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", sin_acentos.strip().lower()).strip("_")
+    return slug or "conversacion"
+
+
+def listar_dialogos_personalizados():
+    """Devuelve una lista de dicts con cada conversación guardada en
+    dialogos/*.json: {'id', 'nombre', 'participantes', 'lineas'}."""
+    if not os.path.isdir(DIALOGOS_DIR):
+        return []
+    resultado = []
+    for fname in sorted(os.listdir(DIALOGOS_DIR)):
+        if not fname.lower().endswith(".json"):
+            continue
+        path = os.path.join(DIALOGOS_DIR, fname)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            participantes = data.get("participantes") or ["A", "B"]
+            if len(participantes) < 2:
+                participantes = participantes + ["B"]
+            lineas = [tuple(linea) for linea in data.get("lineas", [])]
+            resultado.append({
+                "id": os.path.splitext(fname)[0],
+                "nombre": data.get("nombre", os.path.splitext(fname)[0]),
+                "participantes": (participantes[0], participantes[1]),
+                "lineas": lineas,
+            })
+        except Exception:
+            continue
+    return resultado
+
+
+def guardar_dialogo_personalizado(nombre, participantes, lineas):
+    """Guarda una conversación nueva y devuelve su id (usado luego como
+    subcarpeta en voces/ para no mezclar audios de distintas conversaciones)."""
+    os.makedirs(DIALOGOS_DIR, exist_ok=True)
+    base_slug = _slugify(nombre)
+    slug = base_slug
+    n = 2
+    while os.path.exists(os.path.join(DIALOGOS_DIR, f"{slug}.json")):
+        slug = f"{base_slug}_{n}"
+        n += 1
+    data = {
+        "nombre": nombre,
+        "participantes": list(participantes),
+        "lineas": [[hablante, texto] for hablante, texto in lineas],
+    }
+    with open(os.path.join(DIALOGOS_DIR, f"{slug}.json"), "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return slug
+
+
+# -----------------------------------------------------------------------
 # 2. COMPARAR texto dicho vs esperado
 # -----------------------------------------------------------------------
+# Cualquier caracter que NO sea letra, número o espacio se considera
+# puntuación y se elimina antes de comparar (comas, puntos, signos de
+# interrogación/exclamación, apóstrofes, guiones, etc). Así el usuario
+# nunca es penalizado por no "pronunciar" un signo de puntuación.
+_APOSTROFE_RE = re.compile(r"['’]")
+_PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
+
+
+def limpiar_texto(texto):
+    """Quita toda la puntuación y normaliza espacios/mayúsculas,
+    dejando solo las palabras para poder compararlas de forma justa.
+
+    Los apóstrofes se eliminan SIN dejar espacio (how's -> hows, don't -> dont)
+    para que las contracciones no se partan en dos palabras. El resto de
+    signos (comas, puntos, ?, !, etc.) se reemplazan por espacio."""
+    texto = _APOSTROFE_RE.sub("", texto.lower())
+    sin_puntuacion = _PUNCT_RE.sub(" ", texto)
+    return " ".join(sin_puntuacion.split())
+
+
 def comparar_texto(esperado, dicho):
-    esperado_norm = esperado.lower().strip(" .,!?")
-    dicho_norm = dicho.lower().strip(" .,!?")
+    esperado_norm = limpiar_texto(esperado)
+    dicho_norm = limpiar_texto(dicho)
 
     ratio = difflib.SequenceMatcher(None, esperado_norm, dicho_norm).ratio()
 
@@ -152,6 +289,106 @@ def comparar_texto(esperado, dicho):
         detalle += f"Dijiste de más/diferente: {', '.join(sobraron)}"
 
     return False, ratio, detalle.strip()
+
+
+# -----------------------------------------------------------------------
+# 2.5 COMANDOS DE VOZ — interpretación de lo que dice el usuario
+# -----------------------------------------------------------------------
+# Cada acción tiene varias formas comunes de decirla. Usamos coincidencia
+# difusa (difflib) para tolerar errores del reconocimiento de voz, y
+# quitamos acentos para no depender de que Google STT los transcriba bien.
+# Cada acción tiene frases en español E inglés, porque esta es una app de
+# práctica de inglés y el usuario puede querer dar los comandos en inglés.
+VOICE_COMMANDS = {
+    "repetir": ["repite", "repitelo", "repite la linea", "otra vez", "de nuevo",
+                "vuelve a decir eso", "puedes repetir", "que dijiste",
+                "repeat", "say that again", "one more time", "again", "say it again"],
+    "siguiente": ["siguiente", "continua", "continuemos", "avanza",
+                  "proxima linea", "sigamos", "seguir",
+                  "next", "continue", "go on", "move on", "next line"],
+    "anterior": ["anterior", "atras", "retrocede", "regresa", "linea anterior",
+                 "vuelve atras",
+                 "previous", "go back", "back", "previous line", "go to the previous line"],
+    "grabar": ["graba", "grabar", "empieza a grabar", "inicia grabacion",
+               "quiero grabar", "voy a grabar",
+               "record", "start recording", "let's record", "record it"],
+    "detener": ["detente", "para", "termina", "deten la grabacion", "stop",
+                "ya termine", "listo de grabar",
+                "stop recording", "done", "i'm done", "finish recording"],
+    "escuchar_mia": ["escucha mi grabacion", "reproduce mi grabacion",
+                      "como sono", "escuchame", "reproduce lo que dije",
+                      "listen to my recording", "play my recording", "how did it sound",
+                      "play it back"],
+    "aceptar": ["acepta", "aceptar", "listo", "envia mi respuesta", "califica",
+                "revisa",
+                "accept", "submit", "grade it", "check it", "check my answer"],
+    "menu": ["menu", "salir", "volver al menu", "regresa al menu", "sal de aqui",
+             "go to menu", "exit", "quit", "go back to the menu"],
+    "ayuda": ["ayuda", "comandos", "que puedo decir", "opciones",
+              "que comandos hay",
+              "help", "commands", "what can i say", "options", "what commands are there"],
+}
+
+UMBRAL_COMANDO = 0.72
+
+# Palabra de activación: los comandos SOLO se procesan si el usuario dice
+# primero uno de estos nombres (tus dos finalistas). Todo lo demás que
+# diga se ignora sin interrumpir la práctica. Se incluye "phoenix" además
+# de "fenix" para que también funcione si lo dices en inglés.
+WAKE_WORDS = ["jarvis", "fenix", "phoenix"]
+UMBRAL_WAKE_WORD = 0.72
+
+
+def _quitar_acentos(texto):
+    nfkd = unicodedata.normalize("NFKD", texto)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
+def _normalizar_comando(texto):
+    return _quitar_acentos(limpiar_texto(texto))
+
+
+def detectar_wake_word(texto):
+    """Busca 'Jarvis' o 'Fénix' en lo que dijo el usuario (tolerante a
+    errores de transcripción). Si lo encuentra, devuelve el texto que
+    viene DESPUÉS de la palabra de activación (puede quedar vacío si solo
+    dijo el nombre). Si no la encuentra, devuelve None: no era para
+    nosotros, se ignora sin más."""
+    dicho_norm = _normalizar_comando(texto)
+    if not dicho_norm:
+        return None
+    palabras = dicho_norm.split()
+    for i, palabra in enumerate(palabras):
+        for wake in WAKE_WORDS:
+            ratio = difflib.SequenceMatcher(None, wake, palabra).ratio()
+            if ratio >= UMBRAL_WAKE_WORD:
+                return " ".join(palabras[i + 1:])
+    return None
+
+
+def interpretar_comando(texto):
+    """Devuelve el nombre de la acción reconocida, o None si no coincide
+    con ningún comando conocido."""
+    dicho_norm = _normalizar_comando(texto)
+    if not dicho_norm:
+        return None
+
+    mejor_accion = None
+    mejor_ratio = 0.0
+
+    for accion, frases in VOICE_COMMANDS.items():
+        for frase in frases:
+            frase_norm = _normalizar_comando(frase)
+            if frase_norm in dicho_norm or dicho_norm in frase_norm:
+                return accion
+            ratio = difflib.SequenceMatcher(None, frase_norm, dicho_norm).ratio()
+            if ratio > mejor_ratio:
+                mejor_ratio = ratio
+                mejor_accion = accion
+
+    if mejor_ratio >= UMBRAL_COMANDO:
+        return mejor_accion
+    return None
 
 
 # -----------------------------------------------------------------------
@@ -255,6 +492,134 @@ class VoiceEngine:
 
 
 # -----------------------------------------------------------------------
+# 3.5 OYENTE DE COMANDOS DE VOZ (manos libres, en segundo plano)
+# -----------------------------------------------------------------------
+class VoiceCommandListener:
+    """Escucha el micrófono continuamente en un hilo de fondo y llama a
+    on_command(texto) cada vez que reconoce una frase completa. No bloquea
+    la interfaz. Se puede pausar/reanudar (por ejemplo mientras el programa
+    reproduce audio, para que no se escuche a sí mismo).
+
+    IMPORTANTE: usa 'sounddevice' para capturar el micrófono (la misma
+    librería que ya usa el resto del programa para grabar líneas), NO
+    'sr.Microphone', así que NO necesita PyAudio. Hace su propia detección
+    de silencio (VAD simple por energía/RMS) para saber cuándo empieza y
+    termina una frase, y luego usa 'speech_recognition' solo para mandar
+    ese audio ya capturado a reconocer_google (igual que hace
+    VoiceEngine.transcribe_last_recording)."""
+
+    BLOCK_SIZE = 1600           # ~0.1s por bloque a 16kHz
+    SILENCE_SECONDS = 0.8       # silencio necesario para cerrar una frase
+    MIN_PHRASE_SECONDS = 0.4    # ignora ruidos/sonidos demasiado cortos
+    MIN_THRESHOLD = 300.0
+
+    def __init__(self, on_command):
+        self.on_command = on_command
+        self.enabled = False
+        self._stream = None
+        self._buffer = []
+        self._silence_blocks = 0
+        self._threshold = self.MIN_THRESHOLD
+        self._lock = threading.Lock()
+
+    def start(self):
+        """Bloqueante brevemente (calibra ruido ambiente ~0.5s). Llamar desde
+        un hilo secundario para no congelar la interfaz."""
+        with self._lock:
+            if self.enabled:
+                return
+            try:
+                self._buffer = []
+                self._silence_blocks = 0
+
+                # Calibración rápida de ruido ambiente: graba medio segundo
+                # en silencio y usa eso para fijar el umbral de voz.
+                calib = sd.rec(int(0.5 * SAMPLE_RATE), samplerate=SAMPLE_RATE,
+                                channels=1, dtype="int16")
+                sd.wait()
+                ambient_rms = float(np.sqrt(np.mean(calib.astype(np.float32) ** 2)))
+                self._threshold = max(self.MIN_THRESHOLD, ambient_rms * 2.5)
+
+                self._stream = sd.InputStream(
+                    samplerate=SAMPLE_RATE, channels=1, dtype="int16",
+                    blocksize=self.BLOCK_SIZE, callback=self._audio_callback,
+                )
+                self._stream.start()
+                self.enabled = True
+            except Exception as e:
+                print(f"[Comandos de voz] No se pudo iniciar el micrófono: {e}")
+                self.enabled = False
+
+    def stop(self):
+        with self._lock:
+            if not self.enabled:
+                return
+            if self._stream:
+                try:
+                    self._stream.stop()
+                    self._stream.close()
+                except Exception:
+                    pass
+                self._stream = None
+            self.enabled = False
+            self._buffer = []
+            self._silence_blocks = 0
+
+    def pause(self):
+        self.stop()
+
+    def resume(self):
+        self.start()
+
+    def _audio_callback(self, indata, frames, time_info, status):
+        if not self.enabled:
+            return
+        chunk = indata.copy()
+        rms = float(np.sqrt(np.mean(chunk.astype(np.float32) ** 2)))
+
+        if rms > self._threshold:
+            self._buffer.append(chunk)
+            self._silence_blocks = 0
+            return
+
+        if not self._buffer:
+            return  # todavía no ha empezado a hablar, no hay nada que cerrar
+
+        self._buffer.append(chunk)  # un poco de silencio de cola suena más natural
+        self._silence_blocks += 1
+        silencio_seg = self._silence_blocks * (frames / SAMPLE_RATE)
+        if silencio_seg < self.SILENCE_SECONDS:
+            return
+
+        chunks = self._buffer
+        self._buffer = []
+        self._silence_blocks = 0
+        total_seg = sum(c.shape[0] for c in chunks) / SAMPLE_RATE
+        if total_seg >= self.MIN_PHRASE_SECONDS:
+            threading.Thread(target=self._process_phrase, args=(chunks,), daemon=True).start()
+
+    def _process_phrase(self, chunks):
+        audio = np.concatenate(chunks, axis=0)
+        recognizer = sr.Recognizer()
+        audio_data = sr.AudioData(audio.tobytes(), SAMPLE_RATE, 2)
+        # Probamos inglés primero (esta es una app de práctica de inglés)
+        # y si no reconoce nada, caemos a español. Un solo intento exitoso
+        # es suficiente; solo seguimos probando si el primero no entendió.
+        texto = None
+        for lang in ("en-US", "es-ES"):
+            try:
+                texto = recognizer.recognize_google(audio_data, language=lang)
+                if texto:
+                    break
+            except sr.UnknownValueError:
+                continue
+            except sr.RequestError:
+                return
+        if texto and self.on_command:
+            self.on_command(texto)
+
+
+# -----------------------------------------------------------------------
 # 4. INTERFAZ GRÁFICA — tema HUD estilo Jarvis
 # -----------------------------------------------------------------------
 BG = "#050a12"
@@ -282,11 +647,12 @@ class JarvisApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("J.A.R.V.I.S. — Práctica oral")
-        self.geometry("620x750")
+        self.geometry("620x780")
         self.configure(bg=BG)
         self.resizable(False, False)
 
         self.voice = VoiceEngine()
+        self.cmd_listener = VoiceCommandListener(on_command=self._on_voice_command_raw)
 
         # estado de práctica
         self.dialogue_index = 0
@@ -297,6 +663,19 @@ class JarvisApp(tk.Tk):
         self.subtitles_on = True
         self.current_hablante = None
         self.current_texto = None
+        self.practice_mode = MODE_FULL
+
+        # conversación activa: por defecto la de Juan & Julián que trae la app.
+        # Al elegir una conversación personalizada, estos tres se reemplazan.
+        self.active_dialogue = DIALOGUE
+        self.active_dialogue_id = ""   # "" = conversación original (rutas de voz sin cambios)
+        self.active_participantes = ("Juan", "Julian")
+
+        # estado del editor de conversaciones personalizadas
+        self.editor_participantes = []
+        self.editor_lineas = []
+        self.editor_entry = None
+        self.editor_listbox = None
 
         # estado del grabador de voces
         self.rec_index = 0
@@ -307,15 +686,56 @@ class JarvisApp(tk.Tk):
         self.anim_cy = 140
         self.canvas = None
         self.continue_btn = None
+        self.back_btn = None
         self.status_dot_label = None
+        self.mic_status_label = None
+        self.mic_toggle_btn = None
+        self.record_btn = None
+        self.play_btn = None
+        self.accept_btn = None
+        self.replay_btn = None
+
+        # estado del flujo "Jarvis" -> (respuesta) -> comando en dos pasos
+        self.awaiting_command = False
+        self.awaiting_timer_id = None
+        self.AWAITING_TIMEOUT_MS = 6000
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build_main_menu()
+        # Saluda al iniciar el programa (usa tu voz si grabaste la frase
+        # "bienvenida", si no, cae en voz robótica de respaldo).
+        self.after(400, lambda: self._decir_frase_sistema("bienvenida"))
+
+    def _on_close(self):
+        self.cmd_listener.stop()
+        self.destroy()
+
+    # ---------------- conversación activa ----------------
+    def _item_id(self, i, hablante):
+        """Id de archivo de voz para la línea i de la conversación ACTIVA.
+        La conversación original usa las rutas de siempre (voces/00_Juan.wav);
+        cada conversación personalizada usa su propia subcarpeta
+        (voces/<id>/00_Nombre.wav) para no mezclar audios entre conversaciones."""
+        if self.active_dialogue_id:
+            return f"{self.active_dialogue_id}/{i:02d}_{hablante}"
+        return f"{i:02d}_{hablante}"
+
+    def _usar_dialogo_default(self):
+        self.active_dialogue = DIALOGUE
+        self.active_dialogue_id = ""
+        self.active_participantes = ("Juan", "Julian")
 
     # ---------------- utilidades visuales compartidas ----------------
     def _clear(self):
+        self.cmd_listener.stop()
+        self._cancel_awaiting_timeout()
+        self.awaiting_command = False
         for widget in self.winfo_children():
             widget.destroy()
         self.status_dot_label = None
+        self.mic_status_label = None
+        self.mic_toggle_btn = None
 
     def _hud_button(self, parent, text, command, width=28, accent=None, height=2):
         accent = accent or ACCENT
@@ -402,6 +822,171 @@ class JarvisApp(tk.Tk):
         if self.current_texto is None:
             return
         self.line_label.config(text=self._line_display_text(self.current_hablante, self.current_texto))
+
+    # ---------------- comandos de voz manos libres ----------------
+    def _build_voice_command_bar(self, parent):
+        """Fila con el indicador del micrófono de comandos y su botón de
+        silenciar/activar. Solo se usa en las pantallas de práctica."""
+        self.mic_status_label = tk.Label(parent, text="🎤 Activando comandos de voz...",
+                                          font=FONT_SMALL, fg=MUTED, bg=BG)
+        self.mic_status_label.pack(pady=(2, 4))
+        self.mic_toggle_btn = self._hud_button(parent, "🔇 Silenciar comandos", self._toggle_cmd_listener,
+                                                width=26, accent=MUTED)
+        self.mic_toggle_btn.pack(pady=(0, 6))
+        threading.Thread(target=self._start_cmd_listener_async, daemon=True).start()
+
+    def _start_cmd_listener_async(self):
+        self.cmd_listener.start()
+        self.after(0, self._update_mic_status)
+
+    def _toggle_cmd_listener(self):
+        if self.cmd_listener.enabled:
+            self.cmd_listener.stop()
+            self._update_mic_status()
+        else:
+            threading.Thread(target=self._start_cmd_listener_async, daemon=True).start()
+
+    def _update_mic_status(self):
+        if self.mic_status_label is None or not self.mic_status_label.winfo_exists():
+            return
+        if self.awaiting_command:
+            self.mic_status_label.config(text="🎤 Te escucho... di tu comando", fg=ACCENT)
+        elif self.cmd_listener.enabled:
+            self.mic_status_label.config(text="🎤 Di \"Jarvis\" o \"Fénix\" + tu comando", fg=ACCENT)
+        else:
+            self.mic_status_label.config(text="🎤 Comandos en pausa (micrófono apagado)", fg=MUTED)
+        if self.mic_toggle_btn is not None and self.mic_toggle_btn.winfo_exists():
+            if self.cmd_listener.enabled:
+                self.mic_toggle_btn.config(text="🔇 SILENCIAR COMANDOS")
+            else:
+                self.mic_toggle_btn.config(text="🔊 ACTIVAR COMANDOS")
+
+    def _decir_frase_sistema(self, key, on_done=None):
+        """Reproduce una frase interactiva del asistente (ej. saludo,
+        'buena elección'). Usa la grabación con tu voz si existe, o cae en
+        voz robótica de respaldo."""
+        texto = SYSTEM_PHRASES.get(key, "")
+        if not texto:
+            if on_done:
+                on_done()
+            return
+        path = voice_path(f"sistema_{key}")
+        self.voice.play_file_or_speak(path, texto, on_done=on_done)
+
+    def _cmd_pause(self):
+        self.cmd_listener.pause()
+
+    def _cmd_resume_async(self):
+        threading.Thread(target=self._start_cmd_listener_async, daemon=True).start()
+
+    def _on_voice_command_raw(self, texto):
+        # Este callback llega desde el hilo del reconocedor de voz;
+        # lo pasamos al hilo principal de Tk con .after().
+        self.after(0, lambda: self._handle_voice_command(texto))
+
+    def _mostrar_comando_detectado(self, texto, accion):
+        if self.mic_status_label is None or not self.mic_status_label.winfo_exists():
+            return
+        if accion:
+            self.mic_status_label.config(text=f'🎤 Escuché: "{texto}" → {accion}', fg=OK)
+        else:
+            self.mic_status_label.config(text=f'🎤 Te oí, pero no reconocí un comando: "{texto}"', fg=MUTED)
+        self.after(2000, self._update_mic_status)
+
+    def _voice_help(self):
+        self._cmd_pause()
+        ayuda_texto = ("Di Jarvis o Fénix. Espera a que te responda, y luego di tu comando: "
+                       "repite, siguiente, anterior, graba, detente, escucha mi grabación, acepta, o menú.")
+        self.voice.speak(ayuda_texto, on_done=lambda: self.after(0, self._cmd_resume_async))
+
+    # -------- flujo de dos pasos: "Jarvis" -> respuesta -> comando --------
+    def _start_awaiting_timeout(self):
+        self._cancel_awaiting_timeout()
+        self.awaiting_timer_id = self.after(self.AWAITING_TIMEOUT_MS, self._awaiting_timeout)
+
+    def _cancel_awaiting_timeout(self):
+        if self.awaiting_timer_id is not None:
+            try:
+                self.after_cancel(self.awaiting_timer_id)
+            except Exception:
+                pass
+            self.awaiting_timer_id = None
+
+    def _awaiting_timeout(self):
+        self.awaiting_timer_id = None
+        self.awaiting_command = False
+        self._update_mic_status()
+
+    def _responder_activacion(self):
+        """Se dijo el nombre de activación pero sin un comando después.
+        Responde brevemente (con tu voz si grabaste 'te_escucho') para
+        confirmar que está escuchando, y luego se queda en modo "esperando
+        comando": la SIGUIENTE frase que digas (sin necesidad de repetir
+        'Jarvis') se interpretará directamente como el comando."""
+        self._cmd_pause()
+
+        def after_resp():
+            self._cmd_resume_async()
+            self._update_mic_status()
+            self._start_awaiting_timeout()
+
+        self._decir_frase_sistema("te_escucho", on_done=lambda: self.after(0, after_resp))
+
+    def _handle_voice_command(self, texto):
+        if not self.cmd_listener.enabled:
+            return
+
+        # Paso 2: ya dijiste "Jarvis" antes y estamos esperando tu comando,
+        # así que esta frase completa ES el comando (sin necesitar decir
+        # "Jarvis" de nuevo).
+        if self.awaiting_command:
+            self.awaiting_command = False
+            self._cancel_awaiting_timeout()
+            accion = interpretar_comando(texto)
+            self._mostrar_comando_detectado(texto, accion)
+            self._ejecutar_accion(accion)
+            return
+
+        resto = detectar_wake_word(texto)
+        if resto is None:
+            return  # no dijo "Jarvis" ni "Fénix": no era para nosotros, se ignora
+
+        if not resto.strip():
+            # Paso 1: dijo solo "Jarvis" (o "Fénix"), sin comando junto.
+            # Confirmamos y esperamos el comando como una frase aparte.
+            self.awaiting_command = True
+            self._mostrar_comando_detectado(texto, None)
+            self._responder_activacion()
+            return
+
+        # También se sigue permitiendo decir todo junto: "Jarvis, siguiente".
+        accion = interpretar_comando(resto)
+        self._mostrar_comando_detectado(texto, accion)
+        self._ejecutar_accion(accion)
+
+    def _ejecutar_accion(self, accion):
+        if accion == "ayuda":
+            self._voice_help()
+            return
+        if accion == "menu":
+            self._build_main_menu()
+            return
+        if accion is None:
+            return
+
+        boton_por_accion = {
+            "repetir": "replay_btn",
+            "siguiente": "continue_btn",
+            "anterior": "back_btn",
+            "grabar": "record_btn",
+            "detener": "record_btn",
+            "escuchar_mia": "play_btn",
+            "aceptar": "accept_btn",
+        }
+        attr = boton_por_accion.get(accion)
+        btn = getattr(self, attr, None) if attr else None
+        if btn is not None and btn.winfo_exists() and str(btn.cget("state")) == "normal":
+            btn.invoke()
 
     # ---------------- el anillo HUD (arc reactor) ----------------
     def _hud_ticks(self, cx, cy, r1, r2, count, color, rotation=0.0, dim=False, level=0.0):
@@ -500,44 +1085,297 @@ class JarvisApp(tk.Tk):
     def _build_main_menu(self):
         self._clear()
         self.canvas = None
+        # el menú principal siempre parte de la conversación original;
+        # las conversaciones personalizadas se activan solo al elegirlas.
+        self._usar_dialogo_default()
 
         self._hud_header(self, "Práctica oral", "Juan & Julián · Protocolo de conversación en inglés")
 
-        self._hud_button(self, "🎙 Grabar voces de los personajes", self._build_recorder_ui).pack(pady=8)
-        self._hud_button(self, "▶ Practicar diálogo", self._build_role_selector).pack(pady=8)
+        self._hud_button(self, "🎙 Grabar voces de los personajes",
+                          lambda: self._build_recorder_ui("dialogo")).pack(pady=8)
+        self._hud_button(self, "🗣 Grabar frases del asistente (Jarvis)",
+                          lambda: self._build_recorder_ui("sistema"), accent=MUTED).pack(pady=8)
+        self._hud_button(self, "▶ Practicar diálogo (con calificación)",
+                          lambda: self._elegir_modo(MODE_FULL)).pack(pady=8)
+        self._hud_button(self, "🎧 Práctica casual (solo escuchar)",
+                          lambda: self._elegir_modo(MODE_CASUAL), accent=MUTED).pack(pady=8)
+
+        self._hud_separator(self, width=380)
+
+        self._hud_button(self, "📝 Crear conversación nueva", self._build_editor_names,
+                          accent=MUTED).pack(pady=8)
+        self._hud_button(self, "📂 Mis conversaciones guardadas", self._build_custom_dialogue_list,
+                          accent=MUTED).pack(pady=8)
 
         grabadas = sum(
-            1 for i, (hablante, _) in enumerate(DIALOGUE) if os.path.exists(voice_path(i, hablante))
+            1 for i, (hablante, _) in enumerate(DIALOGUE) if os.path.exists(voice_path(f"{i:02d}_{hablante}"))
         )
+        grabadas_sistema = sum(
+            1 for key in SYSTEM_PHRASES if os.path.exists(voice_path(f"sistema_{key}"))
+        )
+        n_personalizadas = len(listar_dialogos_personalizados())
         tk.Label(self, text=spaced(f"voces grabadas: {grabadas} / {len(DIALOGUE)}"),
                  font=FONT_SMALL, fg=MUTED, bg=BG).pack(pady=(24, 0))
+        tk.Label(self, text=spaced(f"frases del asistente: {grabadas_sistema} / {len(SYSTEM_PHRASES)}"),
+                 font=FONT_SMALL, fg=MUTED, bg=BG).pack(pady=(4, 0))
+        tk.Label(self, text=spaced(f"conversaciones personalizadas: {n_personalizadas}"),
+                 font=FONT_SMALL, fg=MUTED, bg=BG).pack(pady=(4, 0))
 
     # ---------------- selector de personaje ----------------
-    def _build_role_selector(self):
+    def _elegir_modo(self, mode):
+        """Se dice 'buena elección' al elegir el tipo de práctica, y luego
+        pasa a la pantalla de elegir personaje."""
+        self._decir_frase_sistema("buena_eleccion")
+        self._build_role_selector(mode)
+
+    def _build_role_selector(self, mode=MODE_FULL):
         self._clear()
         self.canvas = None
-        self._hud_header(self, "Selecciona tu rol", "¿Quién quieres ser en la conversación?")
+        subtitulo = ("¿Quién quieres ser en la conversación?" if mode == MODE_FULL
+                     else "¿Quién quieres ser? (solo escucharás al otro personaje)")
+        self._hud_header(self, "Selecciona tu rol", subtitulo)
 
         frame = tk.Frame(self, bg=BG)
         frame.pack()
 
-        self._hud_button(frame, "Juan", lambda: self._start("Juan"), width=13).grid(row=0, column=0, padx=10)
-        self._hud_button(frame, "Julián", lambda: self._start("Julian"), width=13).grid(row=0, column=1, padx=10)
+        p1, p2 = self.active_participantes
+        self._hud_button(frame, p1, lambda: self._start(p1, mode), width=13).grid(row=0, column=0, padx=10)
+        self._hud_button(frame, p2, lambda: self._start(p2, mode), width=13).grid(row=0, column=1, padx=10)
 
         tk.Button(self, text=spaced("← volver al menú"), font=FONT_SMALL, fg=MUTED, bg=BG,
                   bd=0, relief="flat", cursor="hand2",
                   command=self._build_main_menu).pack(pady=34)
 
     # =========================================================
-    #  MODO 1: GRABAR VOCES DE LOS PERSONAJES
+    #  EDITOR: CREAR UNA CONVERSACIÓN PERSONALIZADA
     # =========================================================
-    def _build_recorder_ui(self):
+    def _build_editor_names(self):
+        """Paso 1: nombres de los dos participantes de la nueva conversación."""
         self._clear()
+        self.canvas = None
+        self._hud_header(self, "Nueva conversación", "Escribe los nombres de los dos participantes")
+
+        frame = tk.Frame(self, bg=BG)
+        frame.pack(pady=10)
+
+        tk.Label(frame, text=spaced("participante 1"), font=FONT_SMALL, fg=MUTED, bg=BG).grid(
+            row=0, column=0, sticky="w", pady=8, padx=(0, 10))
+        e1 = tk.Entry(frame, font=FONT_BODY, bg=PANEL, fg=FG, insertbackground=FG, width=20, relief="flat")
+        e1.grid(row=0, column=1)
+
+        tk.Label(frame, text=spaced("participante 2"), font=FONT_SMALL, fg=MUTED, bg=BG).grid(
+            row=1, column=0, sticky="w", pady=8, padx=(0, 10))
+        e2 = tk.Entry(frame, font=FONT_BODY, bg=PANEL, fg=FG, insertbackground=FG, width=20, relief="flat")
+        e2.grid(row=1, column=1)
+
+        error_label = tk.Label(self, text="", font=FONT_SMALL, fg=WARN, bg=BG)
+        error_label.pack(pady=(6, 0))
+
+        def continuar():
+            p1 = e1.get().strip()
+            p2 = e2.get().strip()
+            if not p1 or not p2:
+                error_label.config(text="Escribe los dos nombres para continuar.")
+                return
+            if p1.lower() == p2.lower():
+                error_label.config(text="Los dos nombres deben ser diferentes.")
+                return
+            self.editor_participantes = [p1, p2]
+            self.editor_lineas = []
+            self._build_editor_lines()
+
+        self._hud_button(self, "Continuar →", continuar, width=20).pack(pady=20)
+        tk.Button(self, text=spaced("← volver al menú"), font=FONT_SMALL, fg=MUTED, bg=BG,
+                  bd=0, relief="flat", cursor="hand2", command=self._build_main_menu).pack(pady=6)
+
+    def _build_editor_lines(self):
+        """Paso 2: escribir cada línea y asignarla a uno de los dos
+        participantes (un botón por participante evita cualquier
+        confusión sobre quién dice qué, incluso si el mismo participante
+        dice varias líneas seguidas)."""
+        self._clear()
+        self.canvas = None
+        p1, p2 = self.editor_participantes
+        self._hud_header(self, "Agregar líneas", f"{p1} & {p2} · escribe la línea y elige quién la dice")
+
+        entry_frame = tk.Frame(self, bg=BG)
+        entry_frame.pack(pady=(0, 8))
+        self.editor_entry = tk.Entry(entry_frame, font=FONT_BODY, bg=PANEL, fg=FG,
+                                      insertbackground=FG, width=46, relief="flat")
+        self.editor_entry.grid(row=0, column=0)
+        self.editor_entry.focus_set()
+        self.editor_entry.bind("<Return>", lambda e: self._editor_add_line(p1))
+
+        btn_row = tk.Frame(self, bg=BG)
+        btn_row.pack(pady=(0, 10))
+        self._hud_button(btn_row, f"+ {p1}", lambda: self._editor_add_line(p1), width=18).grid(
+            row=0, column=0, padx=6)
+        self._hud_button(btn_row, f"+ {p2}", lambda: self._editor_add_line(p2), width=18, accent=MUTED).grid(
+            row=0, column=1, padx=6)
+
+        list_frame = tk.Frame(self, bg=BG)
+        list_frame.pack(pady=(2, 6))
+        self.editor_listbox = tk.Listbox(list_frame, font=("Segoe UI", 10), bg=PANEL, fg=FG,
+                                          width=66, height=11, relief="flat", highlightthickness=1,
+                                          highlightbackground=ACCENT_SOFT, selectbackground=ACCENT_SOFT,
+                                          activestyle="none")
+        self.editor_listbox.pack(side="left")
+        scroll = tk.Scrollbar(list_frame, command=self.editor_listbox.yview)
+        scroll.pack(side="left", fill="y")
+        self.editor_listbox.config(yscrollcommand=scroll.set)
+
+        ctrl_row = tk.Frame(self, bg=BG)
+        ctrl_row.pack(pady=(6, 10))
+        self._hud_button(ctrl_row, "🗑 Eliminar seleccionada", self._editor_eliminar_seleccionada,
+                          width=24, accent=WARN).grid(row=0, column=0, padx=6)
+        self._hud_button(ctrl_row, "✅ Finalizar conversación", self._build_editor_finish,
+                          width=24, accent=OK).grid(row=0, column=1, padx=6)
+
+        tk.Button(self, text=spaced("← cancelar y volver al menú"), font=FONT_SMALL, fg=MUTED, bg=BG,
+                  bd=0, relief="flat", cursor="hand2", command=self._build_main_menu).pack(pady=(6, 0))
+
+        self._editor_refresh_listbox()
+
+    def _editor_refresh_listbox(self):
+        self.editor_listbox.delete(0, tk.END)
+        for i, (hablante, texto) in enumerate(self.editor_lineas, start=1):
+            self.editor_listbox.insert(tk.END, f"{i}. {hablante}: {texto}")
+
+    def _editor_add_line(self, hablante):
+        """Agrega la línea escrita, ya asignada al participante que
+        presionó su botón. No importa si el participante anterior es el
+        mismo: cada línea queda anotada individualmente en orden, así que
+        no hay interferencia entre líneas consecutivas del mismo hablante."""
+        texto = self.editor_entry.get().strip()
+        if not texto:
+            self.editor_entry.focus_set()
+            return
+        self.editor_lineas.append((hablante, texto))
+        self.editor_entry.delete(0, tk.END)
+        self.editor_entry.focus_set()
+        self._editor_refresh_listbox()
+        self.editor_listbox.see(tk.END)
+
+    def _editor_eliminar_seleccionada(self):
+        sel = self.editor_listbox.curselection()
+        if not sel:
+            return
+        del self.editor_lineas[sel[0]]
+        self._editor_refresh_listbox()
+
+    def _build_editor_finish(self):
+        """Paso 3: decide que la conversación terminó, le pone un nombre y
+        la guarda en dialogos/*.json."""
+        if not self.editor_lineas:
+            return
+        self._clear()
+        self.canvas = None
+        self._hud_header(self, "Guardar conversación", "Ponle un nombre a esta conversación")
+
+        entry = tk.Entry(self, font=FONT_BODY, bg=PANEL, fg=FG, insertbackground=FG, width=32, relief="flat")
+        entry.insert(0, f"{self.editor_participantes[0]} y {self.editor_participantes[1]}")
+        entry.pack(pady=10)
+        entry.focus_set()
+        entry.icursor(tk.END)
+
+        error_label = tk.Label(self, text="", font=FONT_SMALL, fg=WARN, bg=BG)
+        error_label.pack()
+
+        tk.Label(self, text=spaced(f"{len(self.editor_lineas)} líneas en total"),
+                 font=FONT_SMALL, fg=MUTED, bg=BG).pack(pady=(4, 0))
+
+        def guardar():
+            nombre = entry.get().strip()
+            if not nombre:
+                error_label.config(text="Escribe un nombre para la conversación.")
+                return
+            guardar_dialogo_personalizado(nombre, self.editor_participantes, self.editor_lineas)
+            self._build_main_menu()
+
+        self._hud_button(self, "💾 Guardar", guardar, width=20, accent=OK).pack(pady=16)
+        tk.Button(self, text=spaced("← volver a editar líneas"), font=FONT_SMALL, fg=MUTED, bg=BG,
+                  bd=0, relief="flat", cursor="hand2", command=self._build_editor_lines).pack(pady=6)
+
+    # =========================================================
+    #  MIS CONVERSACIONES PERSONALIZADAS GUARDADAS
+    # =========================================================
+    def _build_custom_dialogue_list(self):
+        self._clear()
+        self.canvas = None
+        dialogos = listar_dialogos_personalizados()
+        self._hud_header(self, "Mis conversaciones", "Elige una conversación personalizada")
+
+        if not dialogos:
+            tk.Label(self, text="Todavía no has creado ninguna conversación.\nUsa 'Crear conversación nueva' en el menú.",
+                     font=("Segoe UI", 12), fg=MUTED, bg=BG, justify="center").pack(pady=30)
+        else:
+            for d in dialogos:
+                p1, p2 = d["participantes"]
+                etiqueta = f"{d['nombre']} ({p1} & {p2}, {len(d['lineas'])} líneas)"
+                self._hud_button(self, etiqueta, lambda d=d: self._elegir_dialogo_personalizado(d),
+                                  width=44).pack(pady=5)
+
+        tk.Button(self, text=spaced("← volver al menú"), font=FONT_SMALL, fg=MUTED, bg=BG,
+                  bd=0, relief="flat", cursor="hand2", command=self._build_main_menu).pack(pady=(24, 0))
+
+    def _elegir_dialogo_personalizado(self, d):
+        self.active_dialogue = d["lineas"]
+        self.active_dialogue_id = d["id"]
+        self.active_participantes = d["participantes"]
+        self._build_custom_dialogue_actions(d["nombre"])
+
+    def _build_custom_dialogue_actions(self, nombre):
+        self._clear()
+        self.canvas = None
+        p1, p2 = self.active_participantes
+        self._hud_header(self, nombre, f"{p1} & {p2} · {len(self.active_dialogue)} líneas")
+
+        self._hud_button(self, "🎙 Grabar voces de esta conversación",
+                          lambda: self._build_recorder_ui("dialogo")).pack(pady=8)
+        self._hud_button(self, "▶ Practicar (con calificación)",
+                          lambda: self._elegir_modo(MODE_FULL)).pack(pady=8)
+        self._hud_button(self, "🎧 Práctica casual (solo escuchar)",
+                          lambda: self._elegir_modo(MODE_CASUAL), accent=MUTED).pack(pady=8)
+
+        grabadas = sum(
+            1 for i, (hablante, _) in enumerate(self.active_dialogue)
+            if os.path.exists(voice_path(self._item_id(i, hablante)))
+        )
+        tk.Label(self, text=spaced(f"voces grabadas: {grabadas} / {len(self.active_dialogue)}"),
+                 font=FONT_SMALL, fg=MUTED, bg=BG).pack(pady=(20, 0))
+
+        tk.Button(self, text=spaced("← mis conversaciones"), font=FONT_SMALL, fg=MUTED, bg=BG,
+                  bd=0, relief="flat", cursor="hand2", command=self._build_custom_dialogue_list).pack(pady=(20, 4))
+        tk.Button(self, text=spaced("← menú principal"), font=FONT_SMALL, fg=MUTED, bg=BG,
+                  bd=0, relief="flat", cursor="hand2", command=self._build_main_menu).pack()
+
+    # =========================================================
+    #  MODO 1: GRABAR VOCES (personajes del diálogo, o frases del asistente)
+    # =========================================================
+    def _dialogo_items(self):
+        return [
+            {"id": self._item_id(i, hablante), "label": hablante, "texto": texto}
+            for i, (hablante, texto) in enumerate(self.active_dialogue)
+        ]
+
+    def _sistema_items(self):
+        return [
+            {"id": f"sistema_{key}", "label": SYSTEM_PHRASE_LABELS.get(key, key), "texto": texto}
+            for key, texto in SYSTEM_PHRASES.items()
+        ]
+
+    def _build_recorder_ui(self, modo="dialogo"):
+        self._clear()
+        self.rec_modo = modo
+        self.rec_items = self._dialogo_items() if modo == "dialogo" else self._sistema_items()
         self.rec_index = 0
 
         self.anim_cx, self.anim_cy = 310, 120
         self.canvas = tk.Canvas(self, width=620, height=230, bg=BG, highlightthickness=0)
         self.canvas.pack(pady=(10, 5))
+
+        titulo = "Grabando voces de los personajes" if modo == "dialogo" else "Grabando frases del asistente"
+        tk.Label(self, text=spaced(titulo), font=FONT_SUB, fg=MUTED, bg=BG).pack(pady=(0, 4))
 
         self.rec_status = tk.Label(self, text="", font=("Segoe UI", 11), fg=MUTED, bg=BG)
         self.rec_status.pack()
@@ -572,17 +1410,17 @@ class JarvisApp(tk.Tk):
         self._load_recorder_line()
 
     def _load_recorder_line(self):
-        if self.rec_index >= len(DIALOGUE):
+        if self.rec_index >= len(self.rec_items):
             self._build_main_menu()
             return
 
-        hablante, texto = DIALOGUE[self.rec_index]
-        path = voice_path(self.rec_index, hablante)
+        item = self.rec_items[self.rec_index]
+        path = voice_path(item["id"])
         ya_existe = os.path.exists(path)
 
-        self.rec_speaker_label.config(text=spaced(hablante) + ("  ✅" if ya_existe else ""))
-        self.rec_line_label.config(text=texto)
-        self.rec_progress_label.config(text=spaced(f"línea {self.rec_index + 1} de {len(DIALOGUE)}"))
+        self.rec_speaker_label.config(text=spaced(item["label"]) + ("  ✅" if ya_existe else ""))
+        self.rec_line_label.config(text=item["texto"])
+        self.rec_progress_label.config(text=spaced(f"línea {self.rec_index + 1} de {len(self.rec_items)}"))
         self.rec_status.config(text="Presiona Grabar para registrar esta línea con tu voz.")
         self.rec_record_btn.config(text="🎙 GRABAR", fg=ACCENT)
 
@@ -625,8 +1463,8 @@ class JarvisApp(tk.Tk):
         self.voice.play_last_recording(on_done=lambda: self.after(0, done))
 
     def _rec_save(self):
-        hablante, _ = DIALOGUE[self.rec_index]
-        path = voice_path(self.rec_index, hablante)
+        item = self.rec_items[self.rec_index]
+        path = voice_path(item["id"])
         self.voice.save_last_recording(path)
         self.rec_status.config(text="✅ Guardada. Pasando a la siguiente línea...")
         self.rec_index += 1
@@ -643,14 +1481,17 @@ class JarvisApp(tk.Tk):
     # =========================================================
     #  MODO 2: PRACTICAR DIÁLOGO
     # =========================================================
-    def _start(self, mi):
+    def _start(self, mi, mode=MODE_FULL):
+        p1, p2 = self.active_participantes
         self.mi_personaje = mi
-        self.otro_personaje = "Julian" if mi == "Juan" else "Juan"
+        self.otro_personaje = p2 if mi == p1 else p1
+        self.practice_mode = mode
         self.dialogue_index = 0
         self.correctas = 0
         self.total_mias = 0
         self._build_main_ui()
-        self._process_next_line()
+        self.anim_state = "speaking"
+        self._decir_frase_sistema("buena_eleccion", on_done=lambda: self.after(0, self._process_next_line))
 
     def _build_main_ui(self):
         self._clear()
@@ -675,14 +1516,21 @@ class JarvisApp(tk.Tk):
         self.btn_frame = tk.Frame(self, bg=BG)
         self.btn_frame.pack(pady=10)
 
-        self.record_btn = self._hud_button(self.btn_frame, "🎙 Grabar", self._toggle_record, width=21)
-        self.record_btn.grid(row=0, column=0, padx=6, pady=4)
-        self.play_btn = self._hud_button(self.btn_frame, "▶ Escuchar", self._play_recording, width=14, accent=MUTED)
-        self.play_btn.config(state="disabled")
-        self.play_btn.grid(row=0, column=1, padx=6, pady=4)
-        self.accept_btn = self._hud_button(self.btn_frame, "✔ Aceptar", self._accept_recording, width=14, accent=OK)
-        self.accept_btn.config(state="disabled")
-        self.accept_btn.grid(row=0, column=2, padx=6, pady=4)
+        self.record_btn = None
+        self.play_btn = None
+        self.accept_btn = None
+        if self.practice_mode == MODE_FULL:
+            self.record_btn = self._hud_button(self.btn_frame, "🎙 Grabar", self._toggle_record, width=21)
+            self.record_btn.grid(row=0, column=0, padx=6, pady=4)
+            self.play_btn = self._hud_button(self.btn_frame, "▶ Escuchar", self._play_recording, width=14, accent=MUTED)
+            self.play_btn.config(state="disabled")
+            self.play_btn.grid(row=0, column=1, padx=6, pady=4)
+            self.accept_btn = self._hud_button(self.btn_frame, "✔ Aceptar", self._accept_recording, width=14, accent=OK)
+            self.accept_btn.config(state="disabled")
+            self.accept_btn.grid(row=0, column=2, padx=6, pady=4)
+        else:
+            tk.Label(self.btn_frame, text=spaced("modo casual · sin grabación ni calificación"),
+                     font=FONT_SMALL, fg=MUTED, bg=BG).grid(row=0, column=0, columnspan=3, pady=4)
 
         self.progress_label = tk.Label(self, text="", font=FONT_SMALL, fg=MUTED, bg=BG)
         self.progress_label.pack(pady=(16, 0))
@@ -691,35 +1539,47 @@ class JarvisApp(tk.Tk):
         self.replay_btn.config(state="disabled")
         self.replay_btn.pack(pady=(10, 0))
 
+        # Barra de comandos de voz manos libres (activa en ambos modos)
+        self._build_voice_command_bar(self)
+
         tk.Button(self, text=spaced("← volver al menú"), font=FONT_SMALL, fg=MUTED, bg=BG,
-                  bd=0, relief="flat", cursor="hand2", command=self._build_main_menu).pack(pady=(8, 0))
+                  bd=0, relief="flat", cursor="hand2", command=self._build_main_menu).pack(pady=(4, 0))
 
         self.continue_btn = None
+        self.back_btn = None
         self._animate()
 
     def _show_summary(self):
         self._clear()
         self.canvas = None
-        self._hud_header(self, "Diálogo terminado", "Resumen de tu sesión de práctica")
-        tk.Label(self, text=f"{self.correctas} / {self.total_mias} líneas correctas",
-                 font=("Segoe UI", 16), fg=FG, bg=BG).pack(pady=10)
+        if self.practice_mode == MODE_CASUAL:
+            self._hud_header(self, "Diálogo terminado", "¡Buen trabajo practicando la conversación!")
+            tk.Label(self, text="Terminaste todo el diálogo en modo casual.",
+                     font=("Segoe UI", 14), fg=FG, bg=BG).pack(pady=10)
+        else:
+            self._hud_header(self, "Diálogo terminado", "Resumen de tu sesión de práctica")
+            tk.Label(self, text=f"{self.correctas} / {self.total_mias} líneas correctas",
+                     font=("Segoe UI", 16), fg=FG, bg=BG).pack(pady=10)
         self._hud_button(self, "Reiniciar", self._build_main_menu, width=18).pack(pady=30)
 
     def _process_next_line(self):
-        if self.dialogue_index >= len(DIALOGUE):
+        if self.dialogue_index >= len(self.active_dialogue):
             self._show_summary()
             return
 
-        hablante, texto = DIALOGUE[self.dialogue_index]
+        hablante, texto = self.active_dialogue[self.dialogue_index]
         self.current_hablante, self.current_texto = hablante, texto
-        self.progress_label.config(text=spaced(f"línea {self.dialogue_index + 1} de {len(DIALOGUE)}"))
+        self.progress_label.config(text=spaced(f"línea {self.dialogue_index + 1} de {len(self.active_dialogue)}"))
         self.feedback_label.config(text="")
         if self.continue_btn is not None:
             self.continue_btn.destroy()
             self.continue_btn = None
+        if self.back_btn is not None:
+            self.back_btn.destroy()
+            self.back_btn = None
 
         if hablante == self.otro_personaje:
-            path = voice_path(self.dialogue_index, hablante)
+            path = voice_path(self._item_id(self.dialogue_index, hablante))
             usa_grabacion = os.path.exists(path)
             texto_estado = (
                 f"🔊 Reproduciendo la voz grabada de {self.otro_personaje}..."
@@ -728,21 +1588,33 @@ class JarvisApp(tk.Tk):
             )
             self.status_label.config(text=texto_estado)
             self.line_label.config(text=self._line_display_text(hablante, texto))
-            self.record_btn.config(state="disabled")
-            self.play_btn.config(state="disabled")
-            self.accept_btn.config(state="disabled")
+            if self.practice_mode == MODE_FULL:
+                self.record_btn.config(state="disabled")
+                self.play_btn.config(state="disabled")
+                self.accept_btn.config(state="disabled")
             self.replay_btn.config(state="disabled")
             self.anim_state = "speaking"
 
             def after_speak():
+                self._cmd_resume_async()
                 self.anim_state = "idle"
                 self.replay_btn.config(state="normal")
                 self.status_label.config(text=f"¿Quieres escuchar a {self.otro_personaje} de nuevo? Si no, continúa.")
-                self.continue_btn = self._hud_button(self.btn_frame, "➡ Continuar", self._advance,
-                                                       width=44, accent=ACCENT)
-                self.continue_btn.grid(row=1, column=0, columnspan=3, pady=(10, 0))
+                if self.practice_mode == MODE_CASUAL:
+                    self._mostrar_controles_casual()
+                else:
+                    self.continue_btn = self._hud_button(self.btn_frame, "➡ Continuar", self._advance,
+                                                           width=44, accent=ACCENT)
+                    self.continue_btn.grid(row=1, column=0, columnspan=3, pady=(10, 0))
 
+            self._cmd_pause()
             self.voice.play_file_or_speak(path, texto, on_done=lambda: self.after(0, after_speak))
+        elif self.practice_mode == MODE_CASUAL:
+            self.status_label.config(text=f"Tu turno ({self.mi_personaje}) — dilo en voz alta cuando quieras.")
+            self.line_label.config(text=self._line_display_text(hablante, texto))
+            self.replay_btn.config(state="disabled")
+            self.anim_state = "idle"
+            self._mostrar_controles_casual()
         else:
             self.total_mias += 1
             self.status_label.config(text=f"Tu turno ({self.mi_personaje}) — presiona Grabar y di la línea:")
@@ -756,28 +1628,31 @@ class JarvisApp(tk.Tk):
     def _replay_audio(self):
         if self.current_texto is None or self.current_hablante is None:
             return
-        es_mi_turno = (self.current_hablante == self.mi_personaje)
+        es_mi_turno_full = (self.current_hablante == self.mi_personaje) and self.practice_mode == MODE_FULL
         self.replay_btn.config(state="disabled")
-        if es_mi_turno:
+        if es_mi_turno_full:
             self.record_btn.config(state="disabled")
             self.play_btn.config(state="disabled")
             self.accept_btn.config(state="disabled")
         self.anim_state = "speaking"
-        path = voice_path(self.dialogue_index, self.current_hablante)
+        path = voice_path(self._item_id(self.dialogue_index, self.current_hablante))
 
         def done():
+            self._cmd_resume_async()
             self.anim_state = "idle"
             self.replay_btn.config(state="normal")
-            if es_mi_turno:
+            if es_mi_turno_full:
                 self.record_btn.config(state="normal")
                 hay_audio = self.voice.last_recording is not None
                 self.play_btn.config(state="normal" if hay_audio else "disabled")
                 self.accept_btn.config(state="normal" if hay_audio else "disabled")
 
+        self._cmd_pause()
         self.voice.play_file_or_speak(path, self.current_texto, on_done=lambda: self.after(0, done))
 
     def _toggle_record(self):
         if not self.voice.recording:
+            self._cmd_pause()
             self.voice.start_recording()
             self.anim_state = "listening"
             self.status_label.config(text="Escuchando... presiona Detener cuando termines.")
@@ -795,6 +1670,7 @@ class JarvisApp(tk.Tk):
             self.accept_btn.config(state="normal" if hay_audio else "disabled")
             self.replay_btn.config(state="normal")
             self.status_label.config(text="Escucha tu grabación o acéptala para revisarla.")
+            self._cmd_resume_async()
 
     def _play_recording(self):
         self.anim_state = "speaking"
@@ -804,12 +1680,14 @@ class JarvisApp(tk.Tk):
         self.replay_btn.config(state="disabled")
 
         def done():
+            self._cmd_resume_async()
             self.anim_state = "idle"
             self.play_btn.config(state="normal")
             self.record_btn.config(state="normal")
             self.accept_btn.config(state="normal")
             self.replay_btn.config(state="normal")
 
+        self._cmd_pause()
         self.voice.play_last_recording(on_done=lambda: self.after(0, done))
 
     def _accept_recording(self):
@@ -826,7 +1704,7 @@ class JarvisApp(tk.Tk):
         threading.Thread(target=run, daemon=True).start()
 
     def _show_feedback(self, dicho):
-        _, texto_esperado = DIALOGUE[self.dialogue_index]
+        _, texto_esperado = self.active_dialogue[self.dialogue_index]
 
         if dicho is None:
             self.feedback_label.config(fg=WARN, text="No pude entender el audio. Intenta de nuevo.")
@@ -854,6 +1732,25 @@ class JarvisApp(tk.Tk):
 
         self.continue_btn = self._hud_button(self.btn_frame, "➡ Continuar", self._advance, width=44, accent=ACCENT)
         self.continue_btn.grid(row=1, column=0, columnspan=3, pady=(10, 0))
+
+    def _mostrar_controles_casual(self):
+        """Muestra Continuar (y Retroceder si no es la primera línea) en modo casual."""
+        if self.dialogue_index > 0:
+            self.back_btn = self._hud_button(self.btn_frame, "⏪ Retroceder", self._retroceder,
+                                              width=20, accent=MUTED)
+            self.back_btn.grid(row=1, column=0, padx=(0, 4), pady=(10, 0))
+            self.continue_btn = self._hud_button(self.btn_frame, "Continuar ⏩", self._advance,
+                                                   width=20, accent=ACCENT)
+            self.continue_btn.grid(row=1, column=1, columnspan=2, padx=(4, 0), pady=(10, 0))
+        else:
+            self.continue_btn = self._hud_button(self.btn_frame, "Continuar ⏩", self._advance,
+                                                   width=44, accent=ACCENT)
+            self.continue_btn.grid(row=1, column=0, columnspan=3, pady=(10, 0))
+
+    def _retroceder(self):
+        if self.dialogue_index > 0:
+            self.dialogue_index -= 1
+        self._process_next_line()
 
     def _advance(self):
         if self.continue_btn is not None:
